@@ -96,7 +96,7 @@ def main():
         {"type": "paragraph", "text": notes},
         {"type": "heading", "text": "文件", "size": 3},
         {"type": "document", "document": {"type": "document", "media": "attach://document"},
-         "caption": {"text": "完整源码快照，解压后查看；不含 Git 提交历史。"}},
+         "caption": {"text": "完整源码，含 Git 提交历史；解压后按 GIT-HISTORY.md 恢复分支、标签及提交记录。"}},
     ]}
     send(name, path.read_bytes(), message)
 

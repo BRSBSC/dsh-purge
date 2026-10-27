@@ -127,6 +127,8 @@ class BackupTests(unittest.TestCase):
         self.assertIn("支持 <新> & 旧版。", text)
         self.assertNotIn("English notes", text)
         self.assertNotIn("旧版说明", text)
+        self.assertIn("含 Git 提交历史", text)
+        self.assertNotIn("不含 Git 提交历史", text)
         self.assertEqual(blocks[-1]["document"], {"type": "document", "media": "attach://document"})
 
     def test_missing_or_different_version_notes_are_not_mislabelled(self):
@@ -197,6 +199,8 @@ class BackupTests(unittest.TestCase):
         real_git("init", "--bare", upstream_remote)
         real_git("remote", "add", "origin", remote)
         real_git("push", "-u", "origin", "master")
+        real_git("branch", "saved-branch")
+        real_git("tag", "v1")
         self.commit("new.txt", "new upstream")
         tip = sync.ref("HEAD")
         real_git("push", upstream_remote, "HEAD:refs/heads/master")
@@ -218,6 +222,20 @@ class BackupTests(unittest.TestCase):
                  patch.dict(os.environ, {"GITHUB_OUTPUT": output, "FORCE_BACKUP": "false"}), \
                  patch("sys.argv", ["sync.py", "backup"]):
                 sync.main()
+            with zipfile.ZipFile("backup/source.zip") as archive:
+                self.assertEqual(archive.read("dsh-purge/new.txt"), b"new upstream")
+                self.assertIn(b"git clone --mirror", archive.read("dsh-purge/GIT-HISTORY.md"))
+                history = archive.read("dsh-purge/history.bundle")
+            bundled = Path("from-zip.bundle")
+            bundled.write_bytes(history)
+            restored = f"restored-{delivered}.git"
+            real_git("clone", "--mirror", str(bundled.resolve()), restored)
+            real_git("--git-dir=" + restored, "fsck", "--full")
+            refs = real_git("--git-dir=" + restored, "show-ref").stdout
+            self.assertIn("refs/heads/saved-branch", refs)
+            self.assertIn("refs/tags/v1", refs)
+            self.assertEqual(real_git("--git-dir=" + restored, "rev-parse", "master").stdout.strip(), tip)
+            self.assertEqual(real_git("--git-dir=" + restored, "rev-list", "--count", "master").stdout.strip(), "2")
             self.assertEqual(real_git("--git-dir=" + remote, "rev-parse", "master").stdout.strip(), tip)
             self.assertEqual(real_git("--git-dir=" + remote, "rev-parse", "backup-upstream").stdout.strip(), tip)
             self.assertIn("changed=" + str(not delivered).lower(), Path(output).read_text())

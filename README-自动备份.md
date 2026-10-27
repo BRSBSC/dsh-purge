@@ -1,6 +1,6 @@
 # dsh-purge 自动同步、构建及 Telegram 备份
 
-工作流位于 **BRSBSC/dsh-purge 的 master 分支**。Telegram 每次只收到一条富消息，按“版本号 → 更新说明 → 文件”排列，附一个源码 ZIP。Bundle、构建安装包及 manifest 仅保留在 GitHub Actions artifacts 中。
+工作流位于 **BRSBSC/dsh-purge 的 master 分支**。Telegram 每次只收到一条富消息，按“版本号 → 更新说明 → 文件”排列，附一个源码 ZIP，包内含完整源码、`history.bundle` Git 历史与 `GIT-HISTORY.md` 恢复说明。构建安装包及 manifest 仅保留在 GitHub Actions artifacts 中。
 
 ## 仓库检查结果
 
@@ -17,7 +17,7 @@
 | 依赖 | 无 dependencies/devDependencies；仅 peerDependency `@deepseek-ai/cordis`，当前无需 npm install |
 | 原发布工作流 | `.github/workflows/release.yml`，入口语法检查、模块导入检查、`git archive` 源码 ZIP；仅在原作者仓库执行 |
 
-构建脚本识别 `package.json`，优先执行 `build`，其次 `build:client`，有 `test` 就运行。安装包使用 `npm pack --ignore-scripts`，保留 LICENSE、NOTICE 与原作者署名。源码 ZIP 是提交原样快照，`.tgz` 才包含本次重建的客户端；后者只保存在 GitHub Actions，不会发到 Telegram 或发布到 npm。
+构建脚本识别 `package.json`，优先执行 `build`，其次 `build:client`，有 `test` 就运行。安装包使用 `npm pack --ignore-scripts`，保留 LICENSE、NOTICE 与原作者署名。Telegram 的源码 ZIP 包含提交源码快照和 Git 历史 Bundle；`.tgz` 才包含本次重建的客户端，后者只保存在 GitHub Actions，不会发到 Telegram 或发布到 npm。
 
 这是针对本仓库实际结构的识别器；项目未来改成其他语言时会明确失败，不会输出伪装成构建产物的源码包。有新依赖时要求 `package-lock.json`，用 `npm ci --ignore-scripts` 安装；需要安装钩子的依赖须人工审查适配。
 
@@ -56,10 +56,10 @@ dsh-purge v1.1.81
 
 文件
 [dsh-purge-v1.1.81-提交短SHA.zip]
-完整源码快照，解压后查看；不含 Git 提交历史。
+完整源码，含 Git 提交历史；解压后按 GIT-HISTORY.md 恢复分支、标签及提交记录。
 ```
 
-版本号和更新说明直接读取待发送的 `source.zip` 中的 `package.json` 和 `release-notes.md`，只匹配该版本，并优先选中文部分；未匹配时标明“该版本未提供更新说明”，不会套用其他版本日志。Telegram 不再发送 Bundle、`.tgz`、manifest、重复 ZIP 或独立校验清单。源码文件名包含版本号和提交短 SHA，同版本的不同提交也能区分。需要支持富消息的 Telegram 客户端才能完整呈现分段布局。
+版本号和更新说明直接读取待发送的 `source.zip` 中的 `package.json` 和 `release-notes.md`，只匹配该版本，并优先选中文部分；未匹配时标明“该版本未提供更新说明”，不会套用其他版本日志。Telegram 不再单独发送 Bundle、`.tgz`、manifest、重复 ZIP 或校验清单。源码文件名包含版本号和提交短 SHA，同版本的不同提交也能区分。需要支持富消息的 Telegram 客户端才能完整呈现分段布局。
 
 上传脚本对 HTTP 状态和 JSON `ok` 都做检查，429 按服务端等待时间有限重试；其他失败退出。源码 ZIP 超过 45 MiB 时明确失败，请改从 Actions 下载，不拆分为多条消息。网络超时不自动重发，避免服务端已接收时重复发送；整次手动或定时重跑仍可能重复。
 
@@ -98,15 +98,16 @@ dsh-purge v1.1.81
 
 它不包含上游在首次备份前已删除、又不可达的提交；不含 GitHub Issues、PR、Release 附件、LFS 实际大文件、子模块仓库、GitHub Secrets、未提交文件或服务器 reflog。当前交付没有为这些另加备份。单次轮询之间出现又删除的分支，也无法保证捕获。默认只跟踪 master 的变化来决定构建；仅修改其他分支/标签不会触发新上传，可手动 force_backup 获取快照。
 
-Actions artifacts 默认保留 90 天（还受仓库/组织上限及存储额度约束），不是永久备份。需要历史恢复时，定期下载 GitHub Actions 中的 Bundle 到本地或独立存储。上游不可用时请及时下载失败运行的 `before-sync.bundle`。Telegram 中的源码 ZIP 不含 Git 历史。
+Actions artifacts 默认保留 90 天（还受仓库/组织上限及存储额度约束），不是永久备份。Telegram 源码 ZIP 内含相同的 `history.bundle`，可保存到本地或独立存储以恢复历史。上游不可用时请及时下载失败运行的 `before-sync.bundle`。
 
 ## 恢复
 
-直接解压 Telegram 中的 ZIP 即可查看源码。要恢复分支、标签及提交历史，请从 Actions 的 `history-运行ID-尝试次数` artifact 下载并解压 `history.bundle`：
+直接解压 Telegram 中的 ZIP 即可查看源码。要恢复分支、标签及提交历史，在解压出的 `dsh-purge` 目录内按 `GIT-HISTORY.md` 操作；也可从 Actions 的 `history-运行ID-尝试次数` artifact 下载 `history.bundle`：
 
 ```bash
 git clone --mirror history.bundle restored.git
 git --git-dir=restored.git fsck --full
+git --git-dir=restored.git symbolic-ref HEAD refs/heads/master
 git clone restored.git restored-worktree
 ```
 

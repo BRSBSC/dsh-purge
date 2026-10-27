@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 import urllib.request
+import zipfile
 
 
 def git(*args, check=True):
@@ -74,6 +75,21 @@ def main():
     bundle(out / "history.bundle")
     git("archive", "--format=zip", "--prefix=dsh-purge/",
         "--output=" + str(out / "source.zip"), sha)
+    with zipfile.ZipFile(out / "source.zip", "a", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.write(out / "history.bundle", "dsh-purge/history.bundle")
+        archive.writestr("dsh-purge/GIT-HISTORY.md", (
+            "# Git 提交历史恢复\n\n"
+            "history.bundle 保存本次已获取的 fork 和上游分支、标签及可达提交历史。\n"
+            "不包含 LFS 实际文件、子模块仓库或 GitHub Issues/PR 等平台数据。\n\n"
+            "安装 Git 后，在本文件所在目录执行（使用新的恢复目录）：\n\n```sh\n"
+            "git clone --mirror history.bundle restored.git\n"
+            "git --git-dir=restored.git fsck --full\n"
+            "git --git-dir=restored.git symbolic-ref HEAD refs/heads/master\n"
+            "git clone restored.git restored-worktree\n"
+            f"git -C restored-worktree checkout {sha}\n"
+            "git -C restored-worktree log --oneline\n```\n\n"
+            "直接解压的源码可立即查看；恢复后的 restored-worktree 含 .git 与提交历史。\n"
+        ))
     manifest = {"repository": os.environ.get("GITHUB_REPOSITORY"),
                 "commit": sha, "upstream": upstream,
                 "upstream_repository_id": metadata["id"],
