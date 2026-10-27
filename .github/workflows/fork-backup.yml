@@ -1,0 +1,124 @@
+name: Fork sync, build and Telegram backup
+
+on:
+  schedule:
+    - cron: '3-58/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      force_backup:
+        description: '即使已上传，也重新构建备份'
+        type: boolean
+        default: false
+  repository_dispatch:
+    types: [upstream-updated]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-backup
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'BRSBSC/dsh-purge' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.sync.outputs.sha }}
+      changed: ${{ steps.sync.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: control
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          path: repo
+          fetch-depth: 0
+      - name: Backup, inspect upstream and merge
+        id: sync
+        working-directory: repo
+        env:
+          FORCE_BACKUP: ${{ inputs.force_backup || false }}
+        run: python "$GITHUB_WORKSPACE/control/scripts/fork-backup/sync.py" "$RUNNER_TEMP/backup"
+      - name: Preserve backup even if upstream disappeared or merge failed
+        if: always() && (steps.sync.outputs.changed == 'true' || steps.sync.outcome != 'success')
+        uses: actions/upload-artifact@v4
+        with:
+          name: history-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/backup/
+          if-no-files-found: error
+          retention-days: 90
+
+  build:
+    needs: sync
+    if: needs.sync.outputs.changed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: control
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.sync.outputs.sha }}
+          path: repo
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Detect, build, test and package
+        working-directory: repo
+        run: python "$GITHUB_WORKSPACE/control/scripts/fork-backup/build.py" "$RUNNER_TEMP/build"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/build/
+          if-no-files-found: error
+          retention-days: 90
+
+  deliver:
+    needs: [sync, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: '*-${{ github.run_id }}-${{ github.run_attempt }}'
+          path: ${{ runner.temp }}/delivery
+          merge-multiple: true
+      - name: Send files to Telegram topic
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          TG_MESSAGE_THREAD_ID: ${{ secrets.TG_MESSAGE_THREAD_ID }}
+          BACKUP_SHA: ${{ needs.sync.outputs.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python scripts/fork-backup/telegram.py "$RUNNER_TEMP/delivery"
+
+  mark-delivered:
+    needs: [sync, deliver]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Mark only after every Telegram file succeeded
+        env:
+          BACKUP_SHA: ${{ needs.sync.outputs.sha }}
+        run: git push origin "$BACKUP_SHA:refs/heads/backup-delivered"
