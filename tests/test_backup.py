@@ -1,10 +1,13 @@
 """Offline regression checks; no Telegram messages and no remote writes."""
 import importlib.util
+import io
+import json
 import os
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -94,24 +97,81 @@ class BackupTests(unittest.TestCase):
         self.assertTrue(Path("backup/before-sync.bundle").is_file())
         self.assertEqual(sync.ref("HEAD"), self.base)
 
-    def test_split_roundtrip(self):
-        path = Path("sample.bundle")
-        path.write_bytes(b"123456789")
-        with patch.object(tg, "CHUNK", 4):
-            parts = list(tg.chunks(path))
-        self.assertEqual([p[0] for p in parts], ["sample.bundle.part0001", "sample.bundle.part0002", "sample.bundle.part0003"])
-        self.assertEqual(b"".join(p[1] for p in parts), path.read_bytes())
+    def source_zip(self, version="1.2.3", notes=None):
+        path = Path("source.zip")
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("dsh-purge/package.json", json.dumps({"name": "dsh-purge", "version": version}))
+            if notes is not None:
+                archive.writestr("dsh-purge/release-notes.md", notes)
+        return path
+
+    def test_only_source_zip_is_sent_once_with_version_and_chinese_notes(self):
+        path = self.source_zip(notes="# 1.2.3\n\n## 中文\n\n- 修复 **界面** 与 `配置`。\n- 支持 <新> & 旧版。\n\n## English\n\n- English notes\n\n# 1.2.2\n\n旧版说明")
+        Path("history.bundle").write_bytes(b"history")
+        Path("release-source.zip").write_bytes(b"duplicate")
+        Path("package.tgz").write_bytes(b"package")
+        Path("manifest.json").write_text("{}")
+        with patch("sys.argv", ["telegram.py", "."]), \
+             patch.dict(os.environ, {"BACKUP_SHA": "abcdef0123456789"}), \
+             patch.object(tg, "send") as send:
+            tg.main()
+        send.assert_called_once()
+        name, content, message = send.call_args.args
+        self.assertEqual(name, "dsh-purge-v1.2.3-abcdef0.zip")
+        self.assertEqual(content, path.read_bytes())
+        blocks = message["blocks"]
+        self.assertEqual([b["text"] for b in blocks if b["type"] == "heading"], ["版本号", "更新说明", "文件"])
+        text = json.dumps(message, ensure_ascii=False)
+        self.assertIn("1.2.3", text)
+        self.assertIn("修复 界面 与 配置。", text)
+        self.assertIn("支持 <新> & 旧版。", text)
+        self.assertNotIn("English notes", text)
+        self.assertNotIn("旧版说明", text)
+        self.assertEqual(blocks[-1]["document"], {"type": "document", "media": "attach://document"})
+
+    def test_missing_or_different_version_notes_are_not_mislabelled(self):
+        for notes in (None, "# 9.9.9\n\n## 中文\n\n其他版本内容"):
+            with self.subTest(notes=notes):
+                self.source_zip(notes=notes)
+                with patch("sys.argv", ["telegram.py", "."]), \
+                     patch.dict(os.environ, {"BACKUP_SHA": "abcdef0123456789"}), \
+                     patch.object(tg, "send") as send:
+                    tg.main()
+                message = json.dumps(send.call_args.args[2], ensure_ascii=False)
+                self.assertIn("未提供", message)
+                self.assertNotIn("其他版本内容", message)
+
+    def test_missing_or_oversized_source_is_not_sent(self):
+        with patch("sys.argv", ["telegram.py", "."]), patch.object(tg, "send") as send:
+            with self.assertRaisesRegex(RuntimeError, "source.zip"):
+                tg.main()
+            self.source_zip()
+            with patch.object(tg, "MAX_FILE_SIZE", 1):
+                with self.assertRaisesRegex(RuntimeError, "单文件"):
+                    tg.main()
+            send.assert_not_called()
+
+    def test_invalid_source_version_is_not_sent(self):
+        self.source_zip(version="bad\r\nversion")
+        with patch("sys.argv", ["telegram.py", "."]), patch.object(tg, "send") as send:
+            with self.assertRaisesRegex(ValueError, "版本号"):
+                tg.main()
+            send.assert_not_called()
 
     def test_telegram_multipart_includes_topic_and_document(self):
-        import io
         env = {"TG_BOT_TOKEN": "123:abc", "TG_CHAT_ID": "-100123", "TG_MESSAGE_THREAD_ID": "42"}
+        message = {"blocks": [{"type": "paragraph", "text": "版本与更新说明"},
+                              {"type": "document", "document": {"type": "document", "media": "attach://document"}}]}
         with patch.dict(os.environ, env), \
              patch.object(tg.urllib.request, "urlopen", return_value=io.BytesIO(b'{"ok":true}')) as request:
-            tg.send("history.bundle", b"backup", "commit abc")
+            tg.send("source.zip", b"backup", message)
+        self.assertTrue(request.call_args.args[0].full_url.endswith("/sendRichMessage"))
         body = request.call_args.args[0].data
         self.assertIn(b'name="message_thread_id"\r\n\r\n42', body)
         self.assertIn(b'name="chat_id"\r\n\r\n-100123', body)
-        self.assertIn(b'filename="history.bundle"', body)
+        self.assertIn(b'filename="source.zip"', body)
+        self.assertIn(b'name="rich_message"', body)
+        self.assertIn(b'attach://document', body)
         self.assertIn(b"backup", body)
 
     def test_atomic_rejection_keeps_remote_master_unchanged(self):
