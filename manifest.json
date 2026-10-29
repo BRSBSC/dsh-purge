@@ -1,0 +1,21 @@
+{
+  "repository": "BRSBSC/dsh-purge",
+  "commit": "0c933dc7d3252698f3f0f9756932dcc88355f532",
+  "default_branch": "master",
+  "upstream_refs": {
+    "refs/remotes/upstream/master": "0c933dc7d3252698f3f0f9756932dcc88355f532",
+    "refs/remotes/upstream/oss-public": "0c933dc7d3252698f3f0f9756932dcc88355f532",
+    "refs/upstream-tags/v1.1.73": "ca848d767e134906087cc4f619015142023b00b5",
+    "refs/upstream-tags/v1.1.74": "5a9b8e14856138814a2139a0105481e1dcdaece4",
+    "refs/upstream-tags/v1.1.75": "6980fe283679e6d09e5b28953fc3242f0ef32159",
+    "refs/upstream-tags/v1.1.76": "dbaf377c9771bedc6a5349413d77bb7137738c4e",
+    "refs/upstream-tags/v1.1.77": "ac58b3e35509da23bd75b6250f01007590524102",
+    "refs/upstream-tags/v1.1.78": "fd109e106ce5818b3c00524123a3431e4afc0e81",
+    "refs/upstream-tags/v1.1.79": "24f4a7f5df43a766f52e7fa159188c20eaa2b0f1",
+    "refs/upstream-tags/v1.1.80": "9a8e8481e832ccc1ba0ddbfd4c8d14bbc886cb87",
+    "refs/upstream-tags/v1.1.81": "160b9114cbad7beca3d4d3f9f027ec843bf46f5e",
+    "refs/upstream-tags/v1.1.82": "6318442a88ea7459d0135d0a07f31776c5d6a7b1"
+  },
+  "upstream_repository_id": 1339256252,
+  "history_scope": "fetched source refs and archived objects; no LFS/submodules"
+}
