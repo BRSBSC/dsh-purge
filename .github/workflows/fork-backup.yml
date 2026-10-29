@@ -1,4 +1,4 @@
-name: Fork sync, build and Telegram backup
+name: Upstream mirror and Telegram backup
 
 on:
   schedule:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       force_backup:
-        description: '即使已上传，也重新构建备份'
+        description: '即使已上传，也重新发送源码备份'
         type: boolean
         default: false
   repository_dispatch:
@@ -28,7 +28,9 @@ jobs:
       contents: write
     outputs:
       sha: ${{ steps.sync.outputs.sha }}
+      snapshot: ${{ steps.sync.outputs.snapshot }}
       changed: ${{ steps.sync.outputs.changed }}
+      previous_delivered: ${{ steps.sync.outputs.previous_delivered }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -39,13 +41,13 @@ jobs:
           ref: master
           path: repo
           fetch-depth: 0
-      - name: Backup, inspect upstream and merge
+      - name: Archive history and mirror upstream default branch
         id: sync
         working-directory: repo
         env:
           FORCE_BACKUP: ${{ inputs.force_backup || false }}
         run: python "$GITHUB_WORKSPACE/control/scripts/fork-backup/sync.py" "$RUNNER_TEMP/backup"
-      - name: Preserve backup even if upstream disappeared or merge failed
+      - name: Preserve backup even if upstream disappeared or mirroring failed
         if: always() && (steps.sync.outputs.changed == 'true' || steps.sync.outcome != 'success')
         uses: actions/upload-artifact@v4
         with:
@@ -54,38 +56,9 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-  build:
+  deliver:
     needs: sync
     if: needs.sync.outputs.changed == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          path: control
-          persist-credentials: false
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.sync.outputs.sha }}
-          path: repo
-          persist-credentials: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - name: Detect, build, test and package
-        working-directory: repo
-        run: python "$GITHUB_WORKSPACE/control/scripts/fork-backup/build.py" "$RUNNER_TEMP/build"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: build-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/build/
-          if-no-files-found: error
-          retention-days: 90
-
-  deliver:
-    needs: [sync, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -118,5 +91,6 @@ jobs:
           fetch-depth: 0
       - name: Mark only after the Telegram source message succeeded
         env:
-          BACKUP_SHA: ${{ needs.sync.outputs.sha }}
-        run: git push origin "$BACKUP_SHA:refs/heads/backup-delivered"
+          BACKUP_SHA: ${{ needs.sync.outputs.snapshot }}
+          PREVIOUS_DELIVERED: ${{ needs.sync.outputs.previous_delivered }}
+        run: python scripts/fork-backup/sync.py --mark-delivered

@@ -63,19 +63,28 @@ def main():
         raise RuntimeError("没有待上传的 source.zip")
     if path.stat().st_size > MAX_FILE_SIZE:
         raise RuntimeError("源码 ZIP 超过单文件大小限制，停止发送；请从 GitHub Actions 下载。")
+    sha = os.environ["BACKUP_SHA"]
+    if not re.fullmatch(r"[0-9a-f]{7,40}", sha):
+        raise ValueError("BACKUP_SHA 格式错误")
     with zipfile.ZipFile(path) as archive:
         def read(name):
-            info = archive.getinfo("dsh-purge/" + name)
+            try:
+                info = archive.getinfo("dsh-purge/" + name)
+            except KeyError:
+                return ""
             if info.file_size > 256 * 1024:
-                raise RuntimeError("源码中的说明文件过大：" + name)
-            return archive.read(info).decode("utf-8-sig")
+                return ""
+            return archive.read(info).decode("utf-8-sig", errors="replace")
 
-        package = json.loads(read("package.json"))
-        version = package["version"]
+        try:
+            package = json.loads(read("package.json"))
+        except (ValueError, RecursionError):
+            package = {}
+        version = package.get("version") if isinstance(package, dict) else None
         if not isinstance(version, str) or not re.fullmatch(r"[A-Za-z0-9.+-]{1,80}", version):
-            raise ValueError("package.json 版本号格式错误")
+            version = None
         notes = ""
-        if "dsh-purge/release-notes.md" in archive.namelist():
+        if version:
             log = read("release-notes.md")
             section = re.search(r"^# " + re.escape(version) + r"\s*\n(.*?)(?=^# |\Z)", log, re.M | re.S)
             if section:
@@ -85,13 +94,10 @@ def main():
     notes = notes.replace("**", "").replace("`", "")
     notes = re.sub(r"^- ", "• ", notes, flags=re.M)
     notes = notes or "该版本未提供更新说明。"
-    sha = os.environ["BACKUP_SHA"]
-    if not re.fullmatch(r"[0-9a-f]{7,40}", sha):
-        raise ValueError("BACKUP_SHA 格式错误")
-    name = f"dsh-purge-v{version}-{sha[:7]}.zip"
+    name = f"dsh-purge-v{version}-{sha[:7]}.zip" if version else f"dsh-purge-{sha[:7]}.zip"
     message = {"blocks": [
         {"type": "heading", "text": "版本号", "size": 3},
-        {"type": "paragraph", "text": f"dsh-purge v{version}"},
+        {"type": "paragraph", "text": f"dsh-purge v{version}" if version else f"未标注版本（提交 {sha[:7]}）"},
         {"type": "heading", "text": "更新说明", "size": 3},
         {"type": "paragraph", "text": notes},
         {"type": "heading", "text": "文件", "size": 3},

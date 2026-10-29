@@ -46,36 +46,154 @@ class BackupTests(unittest.TestCase):
         sync.git("commit", "-m", "fixture")
         return sync.ref("HEAD")
 
-    def test_normal_update_and_local_changes_survive(self):
-        sync.git("checkout", "-b", "upstream")
-        upstream = self.commit("new.txt", "upstream")
-        sync.git("checkout", "master")
-        self.commit("local.txt", "fork customization")
-        sync.validate_update("HEAD", upstream, self.base)
-        sync.git("merge", "--no-edit", upstream)
-        self.assertEqual(Path("local.txt").read_text(), "fork customization")
+    def setup_remotes(self):
+        self.origin = str(Path.cwd() / "origin.git")
+        self.upstream = str(Path.cwd() / "upstream.git")
+        sync.git("init", "--bare", self.origin)
+        sync.git("init", "--bare", self.upstream)
+        sync.git("remote", "add", "origin", self.origin)
+        sync.git("push", "-u", "origin", "master")
+        sync.git("checkout", "-b", "source")
 
-    def test_rewritten_upstream_stops(self):
-        old = self.commit("old.txt", "old")
+    def publish(self, branch="master"):
+        tip = sync.ref("HEAD")
+        sync.git("push", "--force", self.upstream, f"HEAD:refs/heads/{branch}")
+        sync.git("checkout", "master")
+        return tip
+
+    def run_sync(self, branch="master", force=False, before_push=None, repository_id=1339256252):
+        real_git = sync.git
+        real_git("fetch", "origin")
+
+        def local_git(*args, **kwargs):
+            if args[0] == "push" and before_push:
+                before_push()
+            return real_git(*(self.upstream if v == "https://github.com/YuJunZhiXue/dsh-purge.git" else v
+                              for v in args), **kwargs)
+
+        output = Path.cwd() / "output.txt"
+        output.write_text("")
+        metadata = json.dumps({"id": repository_id, "default_branch": branch}).encode()
+        with patch.object(sync, "git", side_effect=local_git), \
+             patch.object(sync.urllib.request, "urlopen", return_value=io.BytesIO(metadata)), \
+             patch.dict(os.environ, {"GITHUB_OUTPUT": str(output), "FORCE_BACKUP": str(force).lower()}), \
+             patch("sys.argv", ["sync.py", "backup"]):
+            sync.main()
+        return dict(line.split("=", 1) for line in output.read_text().splitlines())
+
+    def remote_sha(self, ref):
+        return sync.git("--git-dir=" + self.origin, "rev-parse", ref).stdout.strip()
+
+    def remote_source(self):
+        return json.loads(sync.git("--git-dir=" + self.origin, "show", "upstream-mirror:manifest.json").stdout)["commit"]
+
+    def run_fresh_sync(self, **kwargs):
+        previous = Path.cwd()
+        with tempfile.TemporaryDirectory() as runner:
+            sync.git("clone", self.origin, runner)
+            os.chdir(runner)
+            try:
+                result = self.run_sync(**kwargs)
+                (previous / "backup").mkdir(exist_ok=True)
+                (previous / "backup/source.zip").write_bytes(Path("backup/source.zip").read_bytes())
+                return result
+            finally:
+                os.chdir(previous)
+
+    def test_mirror_accepts_conflicts_and_upstream_controller_changes_without_touching_master(self):
+        self.commit(".github/workflows/fork-backup.yml", "trusted controller")
+        controller = self.commit("local.txt", "fork customization")
+        self.setup_remotes()
+        self.commit("base.txt", "upstream conflict")
+        self.commit(".github/workflows/fork-backup.yml", "untrusted workflow")
+        tip = self.commit("scripts/fork-backup/sync.py", "raise RuntimeError('never execute')")
+        self.publish()
+        result = self.run_sync()
+        self.assertEqual(self.remote_sha("master"), controller)
+        self.assertEqual(sync.ref("HEAD"), controller)
+        self.assertEqual(Path(".github/workflows/fork-backup.yml").read_text(), "trusted controller")
+        self.assertEqual(self.remote_source(), tip)
+        files = sync.git("--git-dir=" + self.origin, "ls-tree", "--name-only", "upstream-mirror").stdout.splitlines()
+        self.assertEqual(files, ["manifest.json", "source.zip"])
+        self.assertEqual(result["sha"], tip)
+        self.assertEqual(result["changed"], "true")
+        with zipfile.ZipFile("backup/source.zip") as archive:
+            self.assertEqual(archive.read("dsh-purge/base.txt"), b"upstream conflict")
+            self.assertEqual(archive.read("dsh-purge/.github/workflows/fork-backup.yml"), b"untrusted workflow")
+
+    def test_rewrite_rollback_and_unrelated_renamed_branch_preserve_previous_history(self):
+        self.setup_remotes()
+        old = self.commit("old.txt", "old history")
+        sync.git("tag", "-a", "upstream-v1", "-m", "original tag")
+        old_tag = sync.ref("refs/tags/upstream-v1")
+        sync.git("push", self.upstream, "refs/tags/upstream-v1")
+        self.publish()
+        self.run_sync()
+        sync.git("push", "origin", old + ":refs/heads/backup-delivered")
+        sync.git("checkout", "source")
         sync.git("reset", "--hard", self.base)
-        new = self.commit("new.txt", "rewritten")
-        with self.assertRaisesRegex(RuntimeError, "改写"):
-            sync.validate_update("HEAD", new, old)
+        rewritten = self.commit("new.txt", "rewritten history")
+        sync.git("tag", "-f", "-a", "upstream-v1", "-m", "rewritten tag")
+        new_tag = sync.ref("refs/tags/upstream-v1")
+        sync.git("push", "--force", self.upstream, "refs/tags/upstream-v1")
+        self.publish()
+        self.assertEqual(self.run_fresh_sync()["changed"], "true")
+        self.assertEqual(self.remote_source(), rewritten)
+        sync.git("checkout", "source")
+        sync.git("reset", "--hard", self.base)
+        self.publish()
+        self.assertEqual(self.run_fresh_sync()["changed"], "true")
+        self.assertEqual(self.remote_source(), self.base)
+        sync.git("checkout", "--orphan", "renamed")
+        sync.git("rm", "-rf", ".")
+        unrelated = self.commit("fresh.txt", "unrelated repository history")
+        self.publish("new-main")
+        result = self.run_fresh_sync(branch="new-main")
+        self.assertEqual(result["sha"], unrelated)
+        self.assertEqual(self.remote_sha("master"), self.base)
+        with zipfile.ZipFile("backup/source.zip") as archive:
+            Path("from-zip.bundle").write_bytes(archive.read("dsh-purge/history.bundle"))
+            self.assertIn(b"git clone --mirror", archive.read("dsh-purge/GIT-HISTORY.md"))
+        sync.git("clone", "--mirror", str(Path("from-zip.bundle").resolve()), "restored.git")
+        sync.git("--git-dir=restored.git", "fsck", "--full")
+        for sha in (old, rewritten, self.base, unrelated):
+            sync.git("--git-dir=restored.git", "cat-file", "-e", sha + "^{commit}")
+        for tag in (old_tag, new_tag):
+            sync.git("--git-dir=restored.git", "cat-file", "-e", tag + "^{tag}")
+        self.assertEqual(sync.git("--git-dir=" + self.origin, "rev-list", "--count", "upstream-mirror").stdout.strip(), "4")
+        self.assertEqual(self.remote_source(), unrelated)
+        self.assertFalse(any("source.zip" in line for line in sync.git("--git-dir=restored.git", "rev-list", "--objects", "--all").stdout.splitlines()))
+        sync.git("--git-dir=restored.git", "update-ref", "refs/heads/restored-source", unrelated)
+        sync.git("--git-dir=restored.git", "symbolic-ref", "HEAD", "refs/heads/restored-source")
+        sync.git("clone", "restored.git", "restored-worktree")
+        self.assertEqual(sync.git("-C", "restored-worktree", "rev-parse", "HEAD").stdout.strip(), unrelated)
+        self.assertEqual(Path("restored-worktree/fresh.txt").read_text(), "unrelated repository history")
+        self.assertEqual(result["previous_delivered"], old)
 
-    def test_control_workflow_change_stops(self):
-        upstream = self.commit(".github/workflows/evil.yml", "secrets")
-        with self.assertRaisesRegex(RuntimeError, "控制文件"):
-            sync.validate_update(self.base, upstream)
+    def test_mirror_concurrent_update_rejects_entire_push(self):
+        self.setup_remotes()
+        first = self.commit("one.txt", "one")
+        self.publish()
+        self.run_sync()
+        sync.git("checkout", "source")
+        second = self.commit("two.txt", "two")
+        self.publish()
+        real_git = sync.git
+        def race():
+            real_git("push", "--force", self.origin, self.base + ":refs/heads/upstream-mirror")
+        with self.assertRaises(RuntimeError):
+            self.run_sync(before_push=race)
+        self.assertEqual(self.remote_sha("upstream-mirror"), self.base)
+        self.assertEqual(self.remote_sha("master"), self.base)
+        self.assertNotEqual(first, second)
+        self.assertEqual(len(sync.git("--git-dir=" + self.origin, "for-each-ref", "--format=%(refname)").stdout.splitlines()), 2)
 
-    def test_conflict_does_not_touch_remote(self):
-        sync.git("checkout", "-b", "upstream")
-        upstream = self.commit("base.txt", "upstream")
-        sync.git("checkout", "master")
-        head = self.commit("base.txt", "fork")
-        result = sync.git("merge", "--no-edit", upstream, check=False)
-        self.assertNotEqual(result.returncode, 0)
-        sync.git("merge", "--abort")
-        self.assertEqual(sync.ref("HEAD"), head)
+    def test_changed_repository_identity_is_rejected(self):
+        self.setup_remotes()
+        self.publish()
+        with self.assertRaisesRegex(RuntimeError, "身份"):
+            self.run_sync(repository_id=1)
+        self.assertEqual(self.remote_sha("master"), self.base)
 
     def test_bundle_restores_branches_tags_and_history(self):
         sync.git("branch", "saved-branch")
@@ -153,12 +271,25 @@ class BackupTests(unittest.TestCase):
                     tg.main()
             send.assert_not_called()
 
-    def test_invalid_source_version_is_not_sent(self):
-        self.source_zip(version="bad\r\nversion")
-        with patch("sys.argv", ["telegram.py", "."]), patch.object(tg, "send") as send:
-            with self.assertRaisesRegex(ValueError, "版本号"):
+    def test_missing_or_invalid_version_still_sends_source_with_commit_identifier(self):
+        for version in (None, "bad\r\nversion"):
+            self.source_zip(version=version)
+            with patch("sys.argv", ["telegram.py", "."]), \
+                 patch.dict(os.environ, {"BACKUP_SHA": "abcdef0123456789"}), \
+                 patch.object(tg, "send") as send:
                 tg.main()
-            send.assert_not_called()
+            self.assertEqual(send.call_args.args[0], "dsh-purge-abcdef0.zip")
+            self.assertIn("未标注版本", json.dumps(send.call_args.args[2], ensure_ascii=False))
+        for package in (None, "{bad json", "[]", '{"version":' + '9' * 5000 + '}', '[' * 1500 + '0' + ']' * 1500):
+            with zipfile.ZipFile("source.zip", "w") as archive:
+                archive.writestr("dsh-purge/README.md", "source")
+                if package is not None:
+                    archive.writestr("dsh-purge/package.json", package)
+            with patch("sys.argv", ["telegram.py", "."]), \
+                 patch.dict(os.environ, {"BACKUP_SHA": "abcdef0123456789"}), \
+                 patch.object(tg, "send") as send:
+                tg.main()
+            send.assert_called_once()
 
     def test_telegram_multipart_includes_topic_and_document(self):
         env = {"TG_BOT_TOKEN": "123:abc", "TG_CHAT_ID": "-100123", "TG_MESSAGE_THREAD_ID": "42"}
@@ -176,69 +307,36 @@ class BackupTests(unittest.TestCase):
         self.assertIn(b'attach://document', body)
         self.assertIn(b"backup", body)
 
-    def test_atomic_rejection_keeps_remote_master_unchanged(self):
-        remote = str(Path.cwd() / "remote.git")
-        sync.git("init", "--bare", remote)
-        sync.git("push", remote, "HEAD:refs/heads/master")
-        old_upstream = self.commit("old.txt", "old upstream")
-        sync.git("push", remote, "HEAD:refs/heads/backup-upstream")
+    def test_retries_until_delivered_then_skips_and_force_resends(self):
+        self.setup_remotes()
+        tip = self.commit("new.txt", "new upstream")
+        self.publish()
+        result = self.run_sync()
+        self.assertEqual(result["changed"], "true")
+        self.assertEqual(result["previous_delivered"], "")
+        self.assertEqual(self.run_sync()["changed"], "true")
+        sync.mark_delivered(result["snapshot"], "")
+        self.assertEqual(self.run_fresh_sync()["changed"], "false")
+        self.assertEqual(self.remote_sha("upstream-mirror"), result["snapshot"])
+        self.assertEqual(self.run_sync(force=True)["changed"], "true")
+
+    def test_delivery_marker_accepts_rollback_but_rejects_stale_receipt(self):
+        self.setup_remotes()
+        tip = self.commit("new.txt", "new upstream")
+        self.publish()
+        first = self.run_sync()
+        sync.mark_delivered(first["snapshot"], "")
+        sync.git("checkout", "source")
         sync.git("reset", "--hard", self.base)
-        new_upstream = self.commit("new.txt", "rewritten upstream")
-        result = sync.git("push", "--atomic", remote, "HEAD:refs/heads/master",
-                          new_upstream + ":refs/heads/backup-upstream", check=False)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(sync.git("--git-dir=" + remote, "rev-parse", "master").stdout.strip(), self.base)
-        self.assertEqual(sync.git("--git-dir=" + remote, "rev-parse", "backup-upstream").stdout.strip(), old_upstream)
-
-    def test_full_sync_pushes_atomically_and_retries_until_delivered(self):
-        import io
-        real_git = sync.git
-        remote = str(Path.cwd() / "origin.git")
-        upstream_remote = str(Path.cwd() / "upstream.git")
-        real_git("init", "--bare", remote)
-        real_git("init", "--bare", upstream_remote)
-        real_git("remote", "add", "origin", remote)
-        real_git("push", "-u", "origin", "master")
-        real_git("branch", "saved-branch")
-        real_git("tag", "v1")
-        self.commit("new.txt", "new upstream")
-        tip = sync.ref("HEAD")
-        real_git("push", upstream_remote, "HEAD:refs/heads/master")
-        real_git("reset", "--hard", self.base)
-
-        def local_git(*args, **kwargs):
-            return real_git(*(upstream_remote if value == "https://github.com/YuJunZhiXue/dsh-purge.git" else value
-                              for value in args), **kwargs)
-
-        output = str(Path.cwd() / "output.txt")
-        for delivered in (False, True):
-            if delivered:
-                real_git("push", "origin", "HEAD:refs/heads/backup-delivered")
-                real_git("fetch", "origin")
-                real_git("remote", "remove", "upstream")
-                Path(output).write_text("")
-            with patch.object(sync, "git", side_effect=local_git), \
-                 patch.object(sync.urllib.request, "urlopen", return_value=io.BytesIO(b'{"id":1339256252,"default_branch":"master"}')), \
-                 patch.dict(os.environ, {"GITHUB_OUTPUT": output, "FORCE_BACKUP": "false"}), \
-                 patch("sys.argv", ["sync.py", "backup"]):
-                sync.main()
-            with zipfile.ZipFile("backup/source.zip") as archive:
-                self.assertEqual(archive.read("dsh-purge/new.txt"), b"new upstream")
-                self.assertIn(b"git clone --mirror", archive.read("dsh-purge/GIT-HISTORY.md"))
-                history = archive.read("dsh-purge/history.bundle")
-            bundled = Path("from-zip.bundle")
-            bundled.write_bytes(history)
-            restored = f"restored-{delivered}.git"
-            real_git("clone", "--mirror", str(bundled.resolve()), restored)
-            real_git("--git-dir=" + restored, "fsck", "--full")
-            refs = real_git("--git-dir=" + restored, "show-ref").stdout
-            self.assertIn("refs/heads/saved-branch", refs)
-            self.assertIn("refs/tags/v1", refs)
-            self.assertEqual(real_git("--git-dir=" + restored, "rev-parse", "master").stdout.strip(), tip)
-            self.assertEqual(real_git("--git-dir=" + restored, "rev-list", "--count", "master").stdout.strip(), "2")
-            self.assertEqual(real_git("--git-dir=" + remote, "rev-parse", "master").stdout.strip(), tip)
-            self.assertEqual(real_git("--git-dir=" + remote, "rev-parse", "backup-upstream").stdout.strip(), tip)
-            self.assertIn("changed=" + str(not delivered).lower(), Path(output).read_text())
+        self.publish()
+        rolled_back = self.run_sync()
+        self.assertEqual(rolled_back["changed"], "true")
+        sync.mark_delivered(rolled_back["snapshot"], first["snapshot"])
+        self.assertEqual(self.remote_sha("backup-delivered"), rolled_back["snapshot"])
+        with self.assertRaises(RuntimeError):
+            sync.mark_delivered(first["snapshot"], first["snapshot"])
+        self.assertEqual(self.remote_sha("backup-delivered"), rolled_back["snapshot"])
+        self.assertEqual(self.remote_sha("master"), self.base)
 
 
 if __name__ == "__main__":
