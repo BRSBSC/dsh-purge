@@ -1,5 +1,12 @@
 # dsh-purge 上游镜像与 Telegram 备份
 
+> **已停用（2026-11-10）**：上游 `HunYiSage/dsh-purge`（旧名 `YuJunZhiXue/dsh-purge`）已删除，
+> `https://api.github.com/repos/HunYiSage/dsh-purge` 与旧名都返回 404，镜像和 Telegram 备份没有可信来源。
+> `.github/workflows/fork-backup.yml` 已移除 `schedule` 与 `repository_dispatch`，只保留手动
+> `workflow_dispatch`（手动运行会因上游 404 立即失败并保留同步前 Bundle）。脚本、回归用例与本说明
+> 全部保留，用于将来重新指向可用上游；恢复自动触发见文末「重启步骤」。
+> 现有快照分支 `upstream-mirror`、`backup-delivered`、`backup-upstream*` 中的历史数据未删除。
+
 工作流：`.github/workflows/fork-backup.yml`，显示名称 **Upstream mirror and Telegram backup**。
 
 ## 工作方式
@@ -55,7 +62,7 @@ Telegram 不另外发送 Bundle、安装包、manifest 或校验清单。源码 
 
 同步、快照和投递标记使用 GitHub 自动提供的 `GITHUB_TOKEN`，不需要另加 PAT。仓库/组织规则必须允许更新 `upstream-mirror` 与 `backup-delivered`。不能通过代码绕过分支保护规则。
 
-计划为每 5 分钟检查一次；GitHub 调度可能延迟或丢弃运行，不能保证实时。计划只在 fork 的默认分支 `master` 执行，工作流需保持启用。也支持 `repository_dispatch` 的 `upstream-updated` 事件。
+计划触发为每 5 分钟检查一次（**已停用，见文首**）；GitHub 调度可能延迟或丢弃运行，不能保证实时。计划只在 fork 的默认分支 `master` 执行，工作流需保持启用。也支持 `repository_dispatch` 的 `upstream-updated` 事件（**已停用**）。
 
 手动验证：Actions → **Upstream mirror and Telegram backup** → Run workflow，分支选择 `master`。勾选 `force_backup` 会重复发送当前提交；不勾选则只发送尚未成功投递的当前提交。
 
@@ -87,7 +94,26 @@ HTTP 429 有限重试；其他 Telegram 错误明确失败。网络超时可能�
 
 ```sh
 python -B tests/test_backup.py
-npm test
 ```
 
+（1.1.92 起上游已删除 `test/` 与 `npm test` 脚本，Node 用例不再随包提供。）
+
 Python 测试使用临时仓库和模拟网络，不写真实 GitHub 或发送 Telegram 消息。覆盖历史重写、回退、无共同祖先、默认分支更名、控制脚本隔离、历史恢复、并发租约、失败重试、重复抑制及单条源码消息。
+
+## 重启步骤
+
+上游换到新仓库后按下面四步恢复，缺一步都可能推错对象或发错消息：
+
+1. 改身份与地址：`scripts/fork-backup/sync.py` 的 API 地址（第 42 行附近）和 `git fetch` 地址（第 62 行附近）、`tests/test_backup.py` 中用于替换上游 URL 的字符串、`README-自动备份.md` 第 8 行的仓库名。身份校验用仓库数字 ID（`sync.py` 中的 `1339256252`），换成新仓库的 `id` 才能通过。
+2. 恢复触发：在 `.github/workflows/fork-backup.yml` 的 `on:` 下加回
+
+   ```yaml
+     schedule:
+       - cron: '3-58/5 * * * *'
+     repository_dispatch:
+       types: [upstream-updated]
+   ```
+
+3. 校验：`python -B tests/test_backup.py` 全绿后，用 `workflow_dispatch` 手动跑一次，确认 `sync → deliver → mark-delivered` 三个 job 成功。
+4. 确认 `TG_BOT_TOKEN`、`TG_CHAT_ID`、`TG_MESSAGE_THREAD_ID` 三个 Secret 仍在；仓库规则仍允许更新 `upstream-mirror` 与 `backup-delivered`。
+

@@ -1,16 +1,16 @@
 name: Upstream mirror and Telegram backup
 
+# 已停用（2026-11-10）：上游 HunYiSage/dsh-purge（旧名 YuJunZhiXue/dsh-purge）已删除，
+# https://api.github.com/repos/HunYiSage/dsh-purge 与旧名均返回 404，
+# 镜像与 Telegram 备份没有可信来源。计划触发与 repository_dispatch 已移除，
+# 只保留手动 workflow_dispatch；重启自动备份的步骤见 README-自动备份.md「重启步骤」。
 on:
-  schedule:
-    - cron: '3-58/5 * * * *'
   workflow_dispatch:
     inputs:
       force_backup:
         description: '即使已上传，也重新发送源码备份'
         type: boolean
         default: false
-  repository_dispatch:
-    types: [upstream-updated]
 
 permissions:
   contents: read
