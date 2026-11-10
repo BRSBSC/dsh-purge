@@ -68,7 +68,7 @@ class BackupTests(unittest.TestCase):
         def local_git(*args, **kwargs):
             if args[0] == "push" and before_push:
                 before_push()
-            return real_git(*(self.upstream if v == "https://github.com/YuJunZhiXue/dsh-purge.git" else v
+            return real_git(*(self.upstream if v == "https://github.com/HunYiSage/dsh-purge.git" else v
                               for v in args), **kwargs)
 
         output = Path.cwd() / "output.txt"

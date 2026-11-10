@@ -39,7 +39,7 @@ def main():
     # 即使上游已经消失，也先保存 fork 当前所有已获取的 refs。
     bundle(out / "before-sync.bundle")
     with urllib.request.urlopen(
-        "https://api.github.com/repos/YuJunZhiXue/dsh-purge", timeout=30
+        "https://api.github.com/repos/HunYiSage/dsh-purge", timeout=30
     ) as response:
         metadata = json.load(response)
     if metadata["id"] != 1339256252:
@@ -59,7 +59,7 @@ def main():
         for line in restored.splitlines():
             oid = line.split(" ", 1)[0]
             git("update-ref", "refs/archive/" + oid, oid)
-    git("fetch", "--no-tags", "https://github.com/YuJunZhiXue/dsh-purge.git",
+    git("fetch", "--no-tags", "https://github.com/HunYiSage/dsh-purge.git",
         "+refs/heads/*:refs/remotes/upstream/*",
         "+refs/tags/*:refs/upstream-tags/*")
     upstream = ref("refs/remotes/upstream/" + branch)
