@@ -5,7 +5,15 @@
 > `.github/workflows/fork-backup.yml` 已移除 `schedule` 与 `repository_dispatch`，只保留手动
 > `workflow_dispatch`（手动运行会因上游 404 立即失败并保留同步前 Bundle）。脚本、回归用例与本说明
 > 全部保留，用于将来重新指向可用上游；恢复自动触发见文末「重启步骤」。
-> 现有快照分支 `upstream-mirror`、`backup-delivered`、`backup-upstream*` 中的历史数据未删除。
+> 现有快照分支 `upstream-mirror`、`backup-delivered`、`backup-upstream*` 已于同日清理：
+> 远端分支删除前先把四个分支的完整历史导出为本地 bundle（仓库外
+> `_archive/dsh-purge-backup-refs-20261110.bundle`，16.4 MiB，`git bundle verify` 通过），
+> Telegram 的三个 Secret 已删除。恢复远端快照：
+
+```sh
+git clone --mirror <bundle> restored.git
+git -C restored.git push origin refs/remotes/origin/upstream-mirror:refs/heads/upstream-mirror
+```
 
 工作流：`.github/workflows/fork-backup.yml`，显示名称 **Upstream mirror and Telegram backup**。
 
@@ -58,7 +66,7 @@ Telegram 不另外发送 Bundle、安装包、manifest 或校验清单。源码 
 | `TG_CHAT_ID` | 目标群/频道 ID，保留负号，或公开频道用户名 |
 | `TG_MESSAGE_THREAD_ID` | 群话题正整数 ID；不使用话题时不设置 |
 
-机器人需要向目标聊天和话题发送消息、文件的权限。频道关联讨论群的话题需要填写讨论群自己的 Chat ID。
+机器人需要向目标聊天和话题发送消息、文件的权限。频道关联讨论群的话题需要填写讨论群自己的 Chat ID。三个 Secret 已于 2026-11-10 删除，要重新启用需按上表重建。
 
 同步、快照和投递标记使用 GitHub 自动提供的 `GITHUB_TOKEN`，不需要另加 PAT。仓库/组织规则必须允许更新 `upstream-mirror` 与 `backup-delivered`。不能通过代码绕过分支保护规则。
 
@@ -68,7 +76,7 @@ Telegram 不另外发送 Bundle、安装包、manifest 或校验清单。源码 
 
 成功顺序为 `sync → deliver → mark-delivered`。`backup-delivered` 只在 Telegram 成功后指向实际发送的快照提交，其 `manifest.json` 记录上游 SHA；失败会在后续运行重试。上游回退到与上次投递不同的提交也会发送。无变化时复用已有快照，不新增提交、不再投递。
 
-`backup-upstream` 和 `backup-upstream-before-20261029` 是旧方案留下的记录，不再参与判断，不自动删除。请勿手动修改镜像快照分支或投递标记。
+`backup-upstream` 和 `backup-upstream-before-20261029` 是旧方案留下的记录，不再参与判断；2026-11-10 与 `upstream-mirror`、`backup-delivered` 一起从远端删除，历史先导出到文首所述本地 bundle。请勿手动修改镜像快照分支或投递标记。
 
 ## 恢复与边界
 
@@ -102,9 +110,9 @@ Python 测试使用临时仓库和模拟网络，不写真实 GitHub 或发送 T
 
 ## 重启步骤
 
-上游换到新仓库后按下面四步恢复，缺一步都可能推错对象或发错消息：
+上游换到新仓库后按下面五步恢复，缺一步都可能推错对象或发错消息：
 
-1. 改身份与地址：`scripts/fork-backup/sync.py` 的 API 地址（第 42 行附近）和 `git fetch` 地址（第 62 行附近）、`tests/test_backup.py` 中用于替换上游 URL 的字符串、`README-自动备份.md` 第 8 行的仓库名。身份校验用仓库数字 ID（`sync.py` 中的 `1339256252`），换成新仓库的 `id` 才能通过。
+1. 改身份与地址：`scripts/fork-backup/sync.py` 的 API 地址（第 42 行附近）和 `git fetch` 地址（第 62 行附近）、`tests/test_backup.py` 中用于替换上游 URL 的字符串、本文件文首的仓库名。身份校验用仓库数字 ID（`sync.py` 中的 `1339256252`），换成新仓库的 `id` 才能通过。
 2. 恢复触发：在 `.github/workflows/fork-backup.yml` 的 `on:` 下加回
 
    ```yaml
@@ -115,5 +123,6 @@ Python 测试使用临时仓库和模拟网络，不写真实 GitHub 或发送 T
    ```
 
 3. 校验：`python -B tests/test_backup.py` 全绿后，用 `workflow_dispatch` 手动跑一次，确认 `sync → deliver → mark-delivered` 三个 job 成功。
-4. 确认 `TG_BOT_TOKEN`、`TG_CHAT_ID`、`TG_MESSAGE_THREAD_ID` 三个 Secret 仍在；仓库规则仍允许更新 `upstream-mirror` 与 `backup-delivered`。
+4. 重新添加 `TG_BOT_TOKEN`、`TG_CHAT_ID`、`TG_MESSAGE_THREAD_ID` 三个 Secret（2026-11-10 已删除），并确认仓库规则允许工作流创建 `upstream-mirror` 与 `backup-delivered`。
+5. 在 Actions 页面把 **Upstream mirror and Telegram backup** 从停用改为启用（当前为 `disabled_manually`），否则定时与手动触发都不会运行。
 
